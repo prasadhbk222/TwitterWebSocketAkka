@@ -60,26 +60,36 @@ let TwitterClient (webSocket: WebSocket )(mailbox: Actor<_>) =
             let json_data = Json.serialize ogJson
             webSocket.Send json_data
             
-
-
         return! loop()
-
-
-
 
     }
     loop()
+
+let rec takeInput(twitterClient) =
+    Console.Write("What do you want to do?")
+    let input = Console.ReadLine().Split ','
+    let operationType = input.[0]
+
+    match operationType with
+    | "Register" ->
+        let username = input.[1]
+        let password = input.[2]
+        twitterClient <! Register (username, password)
+
+    takeInput(twitterClient)
+
 
 [<EntryPoint>]
 let main argv =
     let clientSystem = ActorSystem.Create("clientSystem", configuration)
     let webSocket = new WebSocket("ws://localhost:8080/websocket")
-    let client = spawn clientSystem "user" TwitterClient webSocket
+    let client = spawn clientSystem "user" (TwitterClient webSocket)
     webSocket.OnOpen.Add(fun args -> System.Console.WriteLine("Open"))
     webSocket.OnClose.Add(fun args -> System.Console.WriteLine("Close"))
     webSocket.OnMessage.Add(fun args -> System.Console.WriteLine("Msg: {0}", args.Data))
     webSocket.OnError.Add(fun args -> System.Console.WriteLine("Error: {0}", args.Message))
     webSocket.Connect()
+    takeInput(client)
 
 
     0
