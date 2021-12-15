@@ -38,6 +38,12 @@ type ResponseType = {
     Data : string
 }
 
+type ResponseTypeReTweet = {
+    Status : string
+    OriginalTweet : string
+    FollowerSockets : Dictionary<String,WebSocket>
+}
+
 type UserSystemActor =
     | Register of string*string*WebSocket
     | Login of string*string*WebSocket
@@ -48,6 +54,7 @@ type UserSystemActor =
 
 type TweetsActor=
     | Tweet of string*string
+    | ReTweet of string*string
     
 
 type TweetsParsorActor=
@@ -61,31 +68,6 @@ type OperationsActor =
 
 let system = ActorSystem.Create("TwitterServer")
 
-// type UserSystem() =
-
-//     let userPasswordMap = new Dictionary<string,string>()
-//     let userSocketMap = new Dictionary<string, WebSocket>()
-//     let mutable activeUsersSet = Set.empty
-//     let userFollowerList = new Dictionary<string, Dictionary<string,string>>()
-//     let hashTagFollowerList = new Dictionary<string, Dictionary<string, string>>()
-//     let userIpPortMap = new Dictionary<string, string>()
-
-
-//     member this.Register username password websocket=
-//         // printfn "in user system"
-//         let mutable response:ResponseType = {Status=""; Data=""}
-//         if userPasswordMap.ContainsKey(username) then
-//             response <- {Status="Fail"; Data="Username already exists!"}
-//         else
-//             let followerDict = new Dictionary<string,string>()
-//             userPasswordMap.Add(username, password)
-//             userFollowerList.Add(username, followerDict)
-//             userSocketMap.Add(username, websocket)
-//             response <- {Status="Success"; Data= sprintf "%s added successfully" username}
-//         // printfn "%A" response
-//         response
-
-// let userSystem = UserSystem()
 
 let TweetsParserActor (mailbox: Actor<_>) =
     //printfn "abc"
@@ -148,7 +130,10 @@ let TweetsParserActor (mailbox: Actor<_>) =
             for tweet in listTweet do
                 combinedTweets <- combinedTweets + tweet + "\n"
 
-            response <- {Status="Success"; Data= combinedTweets}
+            if combinedTweets = "" then
+                response <- {Status="Fail"; Data= "No tweets found"}
+            else
+                response <- {Status="Success"; Data= combinedTweets}
             sender <? response |> ignore
 
 
@@ -192,6 +177,18 @@ let TweetsActor (userSystemActor:IActorRef) (mailbox: Actor<_>) =
             for socket in followerSocket do
                 printfn "%s : %A" socket.Key socket.Value
             sender <? followerSocket |> ignore
+
+
+        | ReTweet(username, id) ->
+            let tweetid = (int) id
+            let retweetmsg = tweetsMap.[tweetid]
+            let promise = userSystemActor <? GetFollowers(username)
+            let followerSocket: Dictionary<String,WebSocket> = Async.RunSynchronously(promise, 10000)
+            let mutable response : ResponseTypeReTweet = {Status="Success"; OriginalTweet=retweetmsg; FollowerSockets=followerSocket}
+            sender <? response |> ignore
+
+
+        
             
 
 
@@ -342,8 +339,14 @@ let OperationsActor (mailbox: Actor<_>) =
                 sender <? response |> ignore
                 // printfn "tweet response %s : %s" response.Status response.Data
 
+            | "retweet" ->
+                printfn "[Operation: retweet] username=%s" username
+                let promise = tweetsActor <? ReTweet (username,tweetmsg)
+                let response : ResponseTypeReTweet = Async.RunSynchronously (promise, 1000)
+                sender <? response |> ignore
+
             | "query" ->
-                printfn "[Operation: tweet] username=%s" username
+                printfn "[Operation: query] username=%s" username
                 let promise = tweetsParserActor <? Query (username,tag)
                 let response : ResponseType = Async.RunSynchronously(promise,10000)
                 sender <? response |> ignore
@@ -390,6 +393,22 @@ let webSocket (webSocket : WebSocket) (context: HttpContext) =
                         |> ByteSegment
                     for socket in followerSockets do
                         do! socket.Value.send Text responseBytes true
+
+                else if (operationType = "retweet") then
+                    let task = operationsActor <? Operate(json, webSocket)
+                    //let followerSockets: Dictionary<string,WebSocket> = Async.RunSynchronously(task, 10000)
+                    let retweetResponse: ResponseTypeReTweet = Async.RunSynchronously(task, 10000)
+                    let followerSockets = retweetResponse.FollowerSockets
+                    let originalTweet = retweetResponse.OriginalTweet
+                    let responseBytes=
+                        (sprintf "%s retweeted : %s" username originalTweet)
+                        |> System.Text.Encoding.ASCII.GetBytes
+                        |> ByteSegment
+                    for socket in followerSockets do
+                        do! socket.Value.send Text responseBytes true
+                    
+                    
+
 
                 else if (operationType = "query") then
                     let task = operationsActor <? Operate(json, webSocket)

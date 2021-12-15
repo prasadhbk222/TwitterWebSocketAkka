@@ -39,6 +39,7 @@ type TwitterClientInstructions =
     | Logout        
     | FollowUser of string        //tofollow
     | Tweet of string        //tweet
+    | ReTweet of string
     | Query of string        //ht por mention
 
 
@@ -93,6 +94,12 @@ let TwitterClient (webSocket: WebSocket )(mailbox: Actor<_>) =
 
         | Tweet msg ->
             let ogJson: MessageType = {OperationType = "tweet"; UserName = UserName; Password = Password; 
+                                        followUser = ""; TweetMsg = sprintf "By %s : %s" UserName msg; Query = ""}
+            let json_data = Json.serialize ogJson
+            webSocket.Send json_data
+
+        | ReTweet msg ->
+            let ogJson: MessageType = {OperationType = "retweet"; UserName = UserName; Password = Password; 
                                         followUser = ""; TweetMsg = msg; Query = ""}
             let json_data = Json.serialize ogJson
             webSocket.Send json_data
@@ -137,9 +144,14 @@ let rec takeInput(twitterClient) =
         let tweet = input.[1]
         twitterClient <! Tweet tweet
 
+    | "ReTweet" ->
+        let tweet = input.[1]
+        twitterClient <! ReTweet tweet
+
     | "Query" ->
         let tag = input.[1]
         twitterClient <! Query tag
+        
 
     | _ ->
         printfn "aa"
