@@ -49,6 +49,10 @@ type UserSystemActor =
 type TweetsActor=
     | Tweet of string*string
 
+type TweetsParsorActor=
+    | ParseTweet of int*string*string
+
+
 type OperationsActor =
     | Operate of MessageType* WebSocket
 
@@ -81,13 +85,70 @@ let system = ActorSystem.Create("TwitterServer")
 
 // let userSystem = UserSystem()
 
+let TweetsParserActor (mailbox: Actor<_>) =
+    //printfn "abc"
+    let hashTagsTweetMap = new Dictionary<string, List<string>>()  // hashtag tweet ids  map for querying
+    let mentionsTweetMap = new Dictionary<string, List<string>>()  // mentions tweet ids map for querying 
+    let rec loop() = actor{
+        let! message = mailbox.Receive()
+        printfn "@@@@@@@@@@@@@@@@@@@@@ in tweets parser"
+        match message with
+        | ParseTweet (tweetId,username, tweet) ->
+            let words = tweet.Split ' '
+            let listHashTags = new List<string>()
+            //let listMentions = new List<string>()
+            let dictMentions = new Dictionary<string, string>()
+            for word in words do
+                if word.[0] = '#' then
+                    listHashTags.Add(word)
+                if word.[0] = '@' then
+                    dictMentions.Add(word.Substring(1), word.Substring(1))
+
+            for hashTag in listHashTags do
+                //printfn "@@@@Parsed hashtag is %s" hashTag
+                if hashTagsTweetMap.ContainsKey(hashTag) then 
+                    hashTagsTweetMap.[hashTag].Add(tweet)
+                else
+                    let listTweet = new List<string>()
+                    listTweet.Add(tweet)
+                    hashTagsTweetMap.Add(hashTag, listTweet)
+                for ht in hashTagsTweetMap do
+                    for tweet in ht.Value do
+                        printfn "%s %s" ht.Key tweet
+
+            for  mention in dictMentions do
+                //printfn "@@@@Parsed hashtag is %s" hashTag
+                let actualmention =  "@" + mention.Key
+                if mentionsTweetMap.ContainsKey(actualmention) then 
+                    mentionsTweetMap.[actualmention].Add(tweet)
+                else
+                    let listTweet = new List<string>()
+                    listTweet.Add(tweet)
+                    mentionsTweetMap.Add(actualmention, listTweet)
+                for mention in mentionsTweetMap do
+                    for tweet in mention.Value do
+                        printfn "%s %s" mention.Key tweet
+            
+            // let actorPath =  @"akka://twitterSystem/user/tweetsRef"
+            // let tweetsRef = select actorPath twitterSystem
+            // tweetsRef <! ReceiveHashTags(userId, tweetId, listHashTags)
+            // tweetsRef <! ReceiveMentions(userId, tweetId, dictMentions)
+
+
+        return! loop()
+    }
+    loop()
+
 
 let TweetsActor (userSystemActor:IActorRef) (mailbox: Actor<_>) =
     let tweetsMap = new Dictionary<int,string>()
     let tweetsUserMap = new Dictionary<int, string>()
     let hashTagsTweetMap = new Dictionary<string, List<int>>()  // hashtag tweet ids  map for querying
     let mentionsTweetMap = new Dictionary<string, List<int>>()  // mentions tweet ids map for querying
+    let userTweetMap = new Dictionary<string, List<String>>()
     let mutable tweetId = 0;
+    let actorPath =  @"akka://TwitterServer/user/tweetsParserActor"
+    let tweetsParserActor = select actorPath system
 
     let rec loop() = actor{
         let! message = mailbox.Receive()
@@ -99,6 +160,15 @@ let TweetsActor (userSystemActor:IActorRef) (mailbox: Actor<_>) =
             tweetId <- tweetId + 1
             tweetsMap.Add(tweetId, tweetmsg)
             tweetsUserMap.Add(tweetId, username)
+            if (userTweetMap.ContainsKey(username)) then
+                userTweetMap.[username].Add(tweetmsg)
+            else
+                let listTweet = new List<string>()
+                listTweet.Add(tweetmsg)
+                userTweetMap.Add(username, listTweet)
+
+            
+            tweetsParserActor <! ParseTweet(tweetId, username, tweetmsg)
             let promise = userSystemActor <? GetFollowers(username)
             let followerSocket: Dictionary<String,WebSocket> = Async.RunSynchronously(promise, 10000)
             for socket in followerSocket do
@@ -329,6 +399,7 @@ let main _ =
   let operationsActor = spawn system "operationsActor" OperationsActor
   let userSystemActor = spawn system "userSystemActor" UserSystemActor
   let tweetsActor = spawn system "tweetsActor" (TweetsActor userSystemActor)
+  let tweetsParserActor = spawn system "tweetsParserActor" TweetsParserActor
   startWebServer { defaultConfig with logger = Targets.create Verbose [||] } app
 
   0
