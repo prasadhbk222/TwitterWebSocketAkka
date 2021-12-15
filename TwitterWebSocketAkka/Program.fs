@@ -42,6 +42,12 @@ type UserSystemActor =
     | Register of string*string*WebSocket
     | Login of string*string*WebSocket
     | Logout of string*WebSocket
+    | Follow of string*string
+    | GetFollowers of string
+    
+
+type TweetsActor=
+    | Tweet of string*string
 
 type OperationsActor =
     | Operate of MessageType* WebSocket
@@ -76,20 +82,37 @@ let system = ActorSystem.Create("TwitterServer")
 // let userSystem = UserSystem()
 
 
+let TweetsActor (userSystemActor:IActorRef) (mailbox: Actor<_>) =
+    let tweetsMap = new Dictionary<int,string>()
+    let tweetsUserMap = new Dictionary<int, string>()
+    let hashTagsTweetMap = new Dictionary<string, List<int>>()  // hashtag tweet ids  map for querying
+    let mentionsTweetMap = new Dictionary<string, List<int>>()  // mentions tweet ids map for querying
+    let mutable tweetId = 0;
+
+    let rec loop() = actor{
+        let! message = mailbox.Receive()
+        let sender = mailbox.Sender()
+
+        match message with
+        | Tweet(username, tweetmsg) ->
+            printfn "@@@@in TweetsActor"
+            tweetId <- tweetId + 1
+            tweetsMap.Add(tweetId, tweetmsg)
+            tweetsUserMap.Add(tweetId, username)
+            let promise = userSystemActor <? GetFollowers(username)
+            let followerSocket: Dictionary<String,WebSocket> = Async.RunSynchronously(promise, 10000)
+            for socket in followerSocket do
+                printfn "%s : %A" socket.Key socket.Value
+            sender <? followerSocket |> ignore
+             
+
+        return! loop()
+    }
+    loop()
 
 
-type Twitter() = 
-    let mutable userPasswordDict = new Dictionary<string,string>()
 
-    member this.Register username password websocket=
-        let mutable response:ResponseType = {Status=""; Data=""}
-        if userPasswordDict.ContainsKey(username) then
-            response <- {Status="Fail"; Data="Username already exists!"}
-        else
-            userPasswordDict.Add(username, password)
-            response <- {Status="Success"; Data= sprintf "%s added successfully" username}
 
-let twitter = Twitter()
 
 
 
@@ -104,7 +127,7 @@ let UserSystemActor (mailbox: Actor<_>) =
     let rec loop () = actor {        
         let! msg = mailbox.Receive ()
         let sender = mailbox.Sender()
-        printfn "%A" msg
+        printfn " in UserSystems Actor => %A" msg
         match msg  with
         |Register(username,password,webSocket) ->
             if username = "dummy" then
@@ -146,10 +169,24 @@ let UserSystemActor (mailbox: Actor<_>) =
             else
                 response <- {Status="Fail"; Data= sprintf "%s not registered" username}
 
+        | Follow(username, userIdOfFollowed) ->
+            if userFollowerList.ContainsKey(userIdOfFollowed) then
+                let followerDict = userFollowerList.[userIdOfFollowed]
+                if  not <| followerDict.ContainsKey(username) then
+                    followerDict.Add(username, username);
+                    response <- {Status="Success"; Data= sprintf "%s followed %s" username userIdOfFollowed}
+                    // printfn "%A" response
 
-
-
-
+        | GetFollowers(username) ->
+            printfn "@@@@in get followers"
+            if userFollowerList.ContainsKey(username) then
+                let followerSocketDict = new Dictionary<string, WebSocket>()
+                let followerDict = userFollowerList.[username]
+                for follower in followerDict do
+                    followerSocketDict.Add(follower.Key, userSocketMap.[follower.Key])
+                sender <? followerSocketDict |> ignore
+                return! loop()
+            
 
         | _ ->  failwith "Invalid Operation "
 
@@ -163,7 +200,7 @@ let OperationsActor (mailbox: Actor<_>) =
     let rec loop() = actor {
         let! msg = mailbox.Receive()
         let sender = mailbox.Sender()
-        printfn "%A" msg
+        printfn " in Operations Actor => %A" msg
 
         match msg with
         | Operate(data, webSocket) ->
@@ -175,6 +212,8 @@ let OperationsActor (mailbox: Actor<_>) =
             let query = data.Query
             let actorPath =  @"akka://TwitterServer/user/userSystemActor"
             let userSystemActor = select actorPath system
+            let actorPath_tweetsActor =  @"akka://TwitterServer/user/tweetsActor"
+            let tweetsActor = select actorPath_tweetsActor system
             let mutable task = userSystemActor <? Register("dummy","", webSocket)
             match operationType with
             | "register" ->
@@ -198,6 +237,19 @@ let OperationsActor (mailbox: Actor<_>) =
                 sender <? response |> ignore
                 printfn "Logout response %s : %s" response.Status response.Data
 
+            | "follow" ->
+                printfn "[Operation: follow] username=%s" username
+                task <- userSystemActor <? Follow (username,followUser)
+                let response: ResponseType = Async.RunSynchronously (task, 1000)
+                sender <? response |> ignore
+                printfn "follow response %s : %s" response.Status response.Data
+
+            | "tweet" ->
+                printfn "[Operation: tweet] username=%s" username
+                let promise = tweetsActor <? Tweet (username,tweetmsg)
+                let response : Dictionary<String,WebSocket> = Async.RunSynchronously (promise, 1000)
+                sender <? response |> ignore
+                // printfn "tweet response %s : %s" response.Status response.Data
 
 
 
@@ -230,15 +282,27 @@ let webSocket (webSocket : WebSocket) (context: HttpContext) =
                 let actorPath =  @"akka://TwitterServer/user/operationsActor"
                 let operationsActor = select actorPath system
 
-                let task = operationsActor <? Operate(json, webSocket)
-                let response: ResponseType = Async.RunSynchronously(task, 10000)
-                // printfn " in websocket %A" response 
-                let responseBytes =
-                    Json.serialize response
-                    |> System.Text.Encoding.ASCII.GetBytes
-                    |> ByteSegment
+                
+                
+                if (operationType = "tweet") then
+                    let task = operationsActor <? Operate(json, webSocket)
+                    let followerSockets: Dictionary<string,WebSocket> = Async.RunSynchronously(task, 10000)
+                    let responseBytes=
+                        (sprintf "tweet: %s by %s" tweetData username)
+                        |> System.Text.Encoding.ASCII.GetBytes
+                        |> ByteSegment
+                    for socket in followerSockets do
+                        do! socket.Value.send Text responseBytes true
 
-                do! webSocket.send Text responseBytes true
+                else 
+                    let task = operationsActor <? Operate(json, webSocket)
+                    let response: ResponseType = Async.RunSynchronously(task, 10000)
+                    let responseBytes =
+                        Json.serialize response
+                        |> System.Text.Encoding.ASCII.GetBytes
+                        |> ByteSegment
+
+                    do! webSocket.send Text responseBytes true
 
             | (Close,_,_) ->
                 let emptyResponse = [||] |> ByteSegment
@@ -264,6 +328,7 @@ let app : WebPart =
 let main _ =
   let operationsActor = spawn system "operationsActor" OperationsActor
   let userSystemActor = spawn system "userSystemActor" UserSystemActor
+  let tweetsActor = spawn system "tweetsActor" (TweetsActor userSystemActor)
   startWebServer { defaultConfig with logger = Targets.create Verbose [||] } app
 
   0

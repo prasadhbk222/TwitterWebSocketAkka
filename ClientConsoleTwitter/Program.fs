@@ -36,7 +36,10 @@ let configuration =
 type TwitterClientInstructions = 
     | Register of string*string    //username, password
     | Login of string*string    //username, password
-    | Logout of string          //username
+    | Logout        //username
+    | FollowUser of string        //username
+    | Tweet of string        //username
+
 
 type MessageType = {
     OperationType : string
@@ -48,8 +51,8 @@ type MessageType = {
 }
 
 let TwitterClient (webSocket: WebSocket )(mailbox: Actor<_>) = 
-    let mutable userName = ""
-    let mutable password = ""
+    let mutable UserName = ""
+    let mutable Password = ""
 
     let rec loop() = actor {
         let! message = mailbox.Receive()
@@ -57,22 +60,42 @@ let TwitterClient (webSocket: WebSocket )(mailbox: Actor<_>) =
 
         match message with
         | Register (username, password) ->
-            let ogJson: MessageType = {OperationType = "register"; UserName = username; Password = password; 
+            UserName <- username
+            Password <- password
+            let ogJson: MessageType = {OperationType = "register"; UserName = UserName; Password = Password; 
                                         followUser = ""; TweetMsg = ""; Query = ""}
             let json_data = Json.serialize ogJson
             webSocket.Send json_data
 
         | Login (username, password) ->
-            let ogJson: MessageType = {OperationType = "login"; UserName = username; Password = password; 
+            UserName <- username
+            Password <- password
+            let ogJson: MessageType = {OperationType = "login"; UserName = UserName; Password = Password; 
                                         followUser = ""; TweetMsg = ""; Query = ""}
             let json_data = Json.serialize ogJson
             webSocket.Send json_data
             
-        | Logout (username) ->
-            let ogJson: MessageType = {OperationType = "logout"; UserName = username; Password = ""; 
+        | Logout ->
+            
+            let ogJson: MessageType = {OperationType = "logout"; UserName = UserName; Password = Password; 
                                         followUser = ""; TweetMsg = ""; Query = ""}
+            UserName <- ""
+            Password <- ""
             let json_data = Json.serialize ogJson
             webSocket.Send json_data
+
+        | FollowUser followUser ->
+            let ogJson: MessageType = {OperationType = "follow"; UserName = UserName; Password = Password; 
+                                        followUser = followUser; TweetMsg = ""; Query = ""}
+            let json_data = Json.serialize ogJson
+            webSocket.Send json_data
+
+        | Tweet msg ->
+            let ogJson: MessageType = {OperationType = "tweet"; UserName = UserName; Password = Password; 
+                                        followUser = ""; TweetMsg = msg; Query = ""}
+            let json_data = Json.serialize ogJson
+            webSocket.Send json_data
+
             
         return! loop()
 
@@ -96,8 +119,16 @@ let rec takeInput(twitterClient) =
         twitterClient <! Login (username, password)
 
     | "Logout" ->
+        // let username = input.[1]
+        twitterClient <! Logout
+
+    | "Follow" ->
         let username = input.[1]
-        twitterClient <! Logout (username)
+        twitterClient <! FollowUser username
+
+    | "Tweet" ->
+        let tweet = input.[1]
+        twitterClient <! Tweet tweet
 
     | _ ->
         printfn "aa"
