@@ -48,9 +48,11 @@ type UserSystemActor =
 
 type TweetsActor=
     | Tweet of string*string
+    
 
 type TweetsParsorActor=
     | ParseTweet of int*string*string
+    | Query of string*string
 
 
 type OperationsActor =
@@ -87,10 +89,12 @@ let system = ActorSystem.Create("TwitterServer")
 
 let TweetsParserActor (mailbox: Actor<_>) =
     //printfn "abc"
+    let mutable response:ResponseType = {Status=""; Data=""}
     let hashTagsTweetMap = new Dictionary<string, List<string>>()  // hashtag tweet ids  map for querying
     let mentionsTweetMap = new Dictionary<string, List<string>>()  // mentions tweet ids map for querying 
     let rec loop() = actor{
         let! message = mailbox.Receive()
+        let sender = mailbox.Sender()
         printfn "@@@@@@@@@@@@@@@@@@@@@ in tweets parser"
         match message with
         | ParseTweet (tweetId,username, tweet) ->
@@ -128,11 +132,25 @@ let TweetsParserActor (mailbox: Actor<_>) =
                 for mention in mentionsTweetMap do
                     for tweet in mention.Value do
                         printfn "%s %s" mention.Key tweet
+
+        | Query (username, tag) ->
+            let mutable listTweet = new List<String>()
+            let mutable combinedTweets = ""
+
+            if tag.[0] = '@' then
+                if mentionsTweetMap.ContainsKey(tag) then
+                    listTweet <- mentionsTweetMap.[tag]
+
+            else if tag.[0] = '#' then
+                if hashTagsTweetMap.ContainsKey(tag) then
+                    listTweet <- hashTagsTweetMap.[tag]
             
-            // let actorPath =  @"akka://twitterSystem/user/tweetsRef"
-            // let tweetsRef = select actorPath twitterSystem
-            // tweetsRef <! ReceiveHashTags(userId, tweetId, listHashTags)
-            // tweetsRef <! ReceiveMentions(userId, tweetId, dictMentions)
+            for tweet in listTweet do
+                combinedTweets <- combinedTweets + tweet + "\n"
+
+            response <- {Status="Success"; Data= combinedTweets}
+            sender <? response |> ignore
+
 
 
         return! loop()
@@ -174,7 +192,8 @@ let TweetsActor (userSystemActor:IActorRef) (mailbox: Actor<_>) =
             for socket in followerSocket do
                 printfn "%s : %A" socket.Key socket.Value
             sender <? followerSocket |> ignore
-             
+            
+
 
         return! loop()
     }
@@ -279,11 +298,13 @@ let OperationsActor (mailbox: Actor<_>) =
             let password = data.Password
             let followUser = data.followUser
             let tweetmsg = data.TweetMsg
-            let query = data.Query
+            let tag = data.Query
             let actorPath =  @"akka://TwitterServer/user/userSystemActor"
             let userSystemActor = select actorPath system
             let actorPath_tweetsActor =  @"akka://TwitterServer/user/tweetsActor"
             let tweetsActor = select actorPath_tweetsActor system
+            let actorPath_tweetsParserActor =  @"akka://TwitterServer/user/tweetsParserActor"
+            let tweetsParserActor = select actorPath_tweetsParserActor system
             let mutable task = userSystemActor <? Register("dummy","", webSocket)
             match operationType with
             | "register" ->
@@ -320,6 +341,12 @@ let OperationsActor (mailbox: Actor<_>) =
                 let response : Dictionary<String,WebSocket> = Async.RunSynchronously (promise, 1000)
                 sender <? response |> ignore
                 // printfn "tweet response %s : %s" response.Status response.Data
+
+            | "query" ->
+                printfn "[Operation: tweet] username=%s" username
+                let promise = tweetsParserActor <? Query (username,tag)
+                let response : ResponseType = Async.RunSynchronously(promise,10000)
+                sender <? response |> ignore
 
 
 
@@ -363,6 +390,15 @@ let webSocket (webSocket : WebSocket) (context: HttpContext) =
                         |> ByteSegment
                     for socket in followerSockets do
                         do! socket.Value.send Text responseBytes true
+
+                else if (operationType = "query") then
+                    let task = operationsActor <? Operate(json, webSocket)
+                    let response : ResponseType = Async.RunSynchronously(task,10000)
+                    let responseBytes=
+                        Json.serialize response
+                        |> System.Text.Encoding.ASCII.GetBytes
+                        |> ByteSegment
+                    do! webSocket.send Text responseBytes true
 
                 else 
                     let task = operationsActor <? Operate(json, webSocket)
